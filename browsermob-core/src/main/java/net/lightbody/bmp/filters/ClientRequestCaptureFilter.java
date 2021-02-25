@@ -35,6 +35,17 @@ public class ClientRequestCaptureFilter extends HttpFiltersAdapter {
     private final ByteArrayOutputStream requestContents = new ByteArrayOutputStream();
 
     /**
+     * Populated when processing the LastHttpContent. If the response is compressed and decompression is requested,
+     * this contains the entire decompressed request. Otherwise it contains the raw response.
+     */
+    private volatile byte[] fullRequestContents;
+
+    /**
+     * Populated when processing the LastHttpContent.
+     */
+    private volatile String contentEncoding;
+
+    /**
      * Populated by clientToProxyRequest() when processing the LastHttpContent.
      */
     private volatile HttpHeaders trailingHeaders;
@@ -51,6 +62,7 @@ public class ClientRequestCaptureFilter extends HttpFiltersAdapter {
     public HttpResponse clientToProxyRequest(HttpObject httpObject) {
         if (httpObject instanceof HttpRequest) {
             this.httpRequest = (HttpRequest) httpObject;
+            captureContentEncoding(httpRequest);
         }
 
         if (httpObject instanceof HttpContent) {
@@ -61,10 +73,43 @@ public class ClientRequestCaptureFilter extends HttpFiltersAdapter {
             if (httpContent instanceof LastHttpContent) {
                 LastHttpContent lastHttpContent = (LastHttpContent) httpContent;
                 trailingHeaders = lastHttpContent .trailingHeaders();
+
+                captureFullRequestContents();
             }
         }
 
         return null;
+    }
+
+    protected void captureFullRequestContents() {
+        // start by setting fullResponseContent to the raw, (possibly) compressed byte stream. replace it
+        // with the decompressed bytes if decompression is successful.
+        fullRequestContents = getRawRequestContents();
+
+        // if the content is compressed, we need to decompress it. but don't use
+        // the netty HttpContentCompressor/Decompressor in the pipeline because we don't actually want it to
+        // change the message sent to the client
+        if (contentEncoding != null) {
+            decompressContents();
+        } else {
+            // no compression
+        }
+    }
+
+    protected void decompressContents() {
+        if (contentEncoding.equals(HttpHeaders.Values.GZIP)) {
+            try {
+                fullRequestContents = BrowserMobHttpUtil.decompressContents(getRawRequestContents());
+            } catch (RuntimeException e) {
+                //log.warn("Failed to decompress response with encoding type " + contentEncoding + " when decoding request from " + originalRequest.getUri(), e);
+            }
+        } else {
+            //log.warn("Cannot decode unsupported content encoding type {}", contentEncoding);
+        }
+    }
+
+    protected void captureContentEncoding(HttpRequest httpRequest) {
+        contentEncoding = HttpHeaders.getHeader(httpRequest, HttpHeaders.Names.CONTENT_ENCODING);
     }
 
     protected void storeRequestContent(HttpContent httpContent) {
@@ -83,6 +128,10 @@ public class ClientRequestCaptureFilter extends HttpFiltersAdapter {
     }
 
     public byte[] getFullRequestContents() {
+        return fullRequestContents;
+    }
+
+    public byte[] getRawRequestContents() {
         return requestContents.toByteArray();
     }
 
@@ -90,4 +139,7 @@ public class ClientRequestCaptureFilter extends HttpFiltersAdapter {
         return trailingHeaders;
     }
 
+    public String getContentEncoding() {
+        return contentEncoding;
+    }
 }
